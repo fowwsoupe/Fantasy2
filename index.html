@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Playoff Schedule Optimizer</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net"/>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    :root { --bg:#0b1020; --card:#131a33; --muted:#8ea0c9; --text:#e9eeff; --accent:#7aa2ff; }
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}
+    h1{font-size:24px;margin:0 0 16px}
+    .card{background:var(--card);border-radius:16px;box-shadow:0 8px 40px rgba(0,0,0,.35);padding:20px;margin:14px 0}
+    .row{display:flex;flex-wrap:wrap;gap:12px}
+    .field{display:grid;gap:8px;min-width:180px}
+    label{font-size:12px;color:var(--muted)}
+    input,select,button{background:#0e1430;color:var(--text);border:1px solid #233057;border-radius:10px;padding:10px}
+    input[type="file"]{padding:6px}
+    button{cursor:pointer}
+    button.primary{background:var(--accent);color:#08122b;border:none}
+    small{color:var(--muted)}
+    table{width:100%;border-collapse:collapse;margin-top:10px}
+    th,td{padding:10px;border-bottom:1px solid #22305a;text-align:right}
+    th:first-child, td:first-child{text-align:left}
+    th{color:#a9b8e8;position:sticky;top:0;background:var(--card)}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#0f1a3d;border:1px solid #2a3f7a;color:#b8c7ff;font-size:12px}
+    .bar{height:8px;background:#0f1a3d;border-radius:999px;overflow:hidden}
+    .bar > span{display:block;height:100%;background:var(--accent)}
+    .muted{color:var(--muted)}
+    .actions{display:flex;gap:10px;flex-wrap:wrap}
+    .notice{font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Playoff Schedule Optimizer</h1>
+
+    <div class="card">
+      <div class="row">
+        <div class="field" style="flex:2">
+          <label>Upload Schedule CSV (<code>date,team,plays</code>)</label>
+          <input id="file" type="file" accept=".csv" />
+          <small>Example rows: <code>2025-03-31,ANA,1</code> • <code>2025-03-31,TOR,0</code></small>
+          <div class="actions">
+            <button id="download-sample">Download sample CSV</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Playoff start</label>
+          <input id="start" type="date" />
+        </div>
+        <div class="field">
+          <label>Playoff end</label>
+          <input id="end" type="date" />
+        </div>
+        <div class="field">
+          <label>Off‑night = days with ≤ (N) NHL games</label>
+          <input id="off-threshold" type="number" min="0" value="4" />
+        </div>
+        <div class="field">
+          <label>Weight: Games</label>
+          <input id="w-games" type="number" step="0.1" value="1" />
+        </div>
+        <div class="field">
+          <label>Weight: Off‑nights (weighted)</label>
+          <input id="w-off" type="number" step="0.1" value="2" />
+        </div>
+        <div class="field">
+          <label>Weight: Back‑to‑backs</label>
+          <input id="w-b2b" type="number" step="0.1" value="0.5" />
+        </div>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="primary" id="run">Compute schedule score</button>
+        <button id="export">Export table (CSV)</button>
+        <span class="notice">Off‑night weight = <code>1 − games_that_day / max_games_in_window</code> (rarer days count more)</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div class="field">
+          <label>Filter teams (e.g., ANA,TOR)</label>
+          <input id="filter" placeholder="Comma‑separated, optional" />
+        </div>
+        <div class="field">
+          <label>Sort by</label>
+          <select id="sort">
+            <option value="score">Score</option>
+            <option value="games">Games</option>
+            <option value="offNights">Off‑nights</option>
+            <option value="offNightWeighted">Weighted off‑nights</option>
+            <option value="b2b">Back‑to‑backs</option>
+            <option value="team">Team</option>
+          </select>
+        </div>
+      </div>
+
+      <table id="table">
+        <thead>
+          <tr>
+            <th>Team</th>
+            <th>Games</th>
+            <th>Off‑nights</th>
+            <th>Weighted off‑nights</th>
+            <th>B2B</th>
+            <th>Score</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="muted" id="summary"></div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const rows = []; // { date, team, plays }
+  const parseDate = (s) => new Date(s + 'T00:00:00');
+
+  // Sample CSV
+  const sampleCsv = `date,team,plays\n2025-03-31,ANA,1\n2025-03-31,BOS,1\n2025-03-31,CAR,0\n2025-04-01,ANA,0\n2025-04-01,BOS,1\n2025-04-01,CAR,1\n2025-04-02,ANA,1\n2025-04-02,BOS,0\n2025-04-02,CAR,1\n`;
+  $('download-sample').addEventListener('click', () => {
+    const blob = new Blob([sampleCsv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'schedule_sample.csv'; a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // File upload
+  $('file').addEventListener('change', (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    Papa.parse(f, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        rows.length = 0;
+        for (const r of res.data) {
+          const date = String(r.date || '').trim();
+          const team = String(r.team || '').trim().toUpperCase();
+          const plays = Number(r.plays);
+          if (!date || !team || !(plays === 0 || plays === 1)) continue;
+          rows.push({ date, team, plays });
+        }
+        render([]);
+        $('summary').textContent = `Loaded ${rows.length} rows across ${new Set(rows.map(r=>r.team)).size} teams.`;
+      }
+    });
+  });
+
+  $('run').addEventListener('click', () => {
+    const start = $('start').value || '0000-01-01';
+    const end = $('end').value || '9999-12-31';
+    const wGames = Number($('w-games').value)||0;
+    const wOff = Number($('w-off').value)||0;
+    const wB2B = Number($('w-b2b').value)||0;
+    const offThr = Number($('off-threshold').value)||0;
+
+    // Filter to window
+    const inRange = rows.filter(r => r.date >= start && r.date <= end);
+
+    // League games by day (convert teams-playing to games //2)
+    const teamsPerDay = new Map();
+    for (const r of inRange) if (r.plays === 1) teamsPerDay.set(r.date, (teamsPerDay.get(r.date)||0)+1);
+    const gamesPerDay = new Map();
+    for (const [d, cnt] of teamsPerDay.entries()) gamesPerDay.set(d, Math.floor(cnt/2));
+    let maxGames = 1; for (const g of gamesPerDay.values()) maxGames = Math.max(maxGames, g);
+
+    // Per-team aggregates
+    const stats = new Map(); // team -> {games, offNights, offNightWeighted, b2b}
+    const datesByTeam = new Map();
+    for (const r of inRange) {
+      if (r.plays !== 1) continue;
+      const g = gamesPerDay.get(r.date)||0;
+      const off = g <= offThr;
+      const weight = 1 - g / maxGames; // rarer days => higher weight
+      const t = stats.get(r.team) || {games:0, offNights:0, offNightWeighted:0, b2b:0};
+      t.games += 1;
+      if (off) { t.offNights += 1; t.offNightWeighted += weight; }
+      stats.set(r.team, t);
+      const dl = datesByTeam.get(r.team) || []; dl.push(r.date); datesByTeam.set(r.team, dl);
+    }
+    for (const [team, list] of datesByTeam.entries()) {
+      list.sort(); let b2b = 0;
+      for (let i=1;i<list.length;i++){
+        const d0 = parseDate(list[i-1]); const d1 = parseDate(list[i]);
+        if ((d1-d0)/(1000*60*60*24) === 1) b2b++;
+      }
+      const t = stats.get(team) || {games:0, offNights:0, offNightWeighted:0, b2b:0};
+      t.b2b = b2b; stats.set(team, t);
+    }
+
+    // Compose table rows
+    const out = [];
+    for (const [team, t] of stats.entries()) {
+      const score = wGames*t.games + wOff*t.offNightWeighted + wB2B*t.b2b;
+      out.push({team, games:t.games, offNights:t.offNights, offNightWeighted:+t.offNightWeighted.toFixed(3), b2b:t.b2b, score:+score.toFixed(3)});
+    }
+
+    // Filter teams text
+    const filt = $('filter').value.trim();
+    let res = out;
+    if (filt) {
+      const set = new Set(filt.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean));
+      res = res.filter(r => set.has(r.team));
+    }
+
+    // Sort
+    const key = $('sort').value;
+    res.sort((a,b)=> (typeof a[key]==='number' ? b[key]-a[key] : String(a[key]).localeCompare(String(b[key]))));
+
+    render(res);
+    const totalDays = new Set(inRange.map(r=>r.date)).size;
+    $('summary').textContent = `${res.length} teams • window days: ${totalDays} • max NHL games/day in window: ${maxGames}`;
+  });
+
+  function render(rows){
+    const tbody = document.querySelector('#table tbody');
+    tbody.innerHTML = '';
+    for (const r of rows){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><span class="pill">${r.team}</span></td>
+        <td>${r.games}</td>
+        <td>${r.offNights}</td>
+        <td>${r.offNightWeighted.toFixed ? r.offNightWeighted.toFixed(3) : r.offNightWeighted}</td>
+        <td>${r.b2b}</td>
+        <td><div class="bar"><span style="width:${Math.min(100, r.score*8)}%"></span></div> ${r.score.toFixed ? r.score.toFixed(3) : r.score}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  // Export table CSV
+  $('export').addEventListener('click', () => {
+    const rows = [['team','games','offNights','offNightWeighted','b2b','score']];
+    document.querySelectorAll('#table tbody tr').forEach(tr => {
+      const cols = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
+      // team pill includes label + score bar text; clean them:
+      const team = tr.querySelector('.pill')?.textContent || cols[0];
+      const scoreTxt = cols[5].split(' ').pop();
+      rows.push([team, cols[1], cols[2], cols[3], cols[4], scoreTxt]);
+    });
+    const csv = rows.map(r=>r.join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'playoff_schedule_scores.csv'; a.click();
+    URL.revokeObjectURL(url);
+  });
+</script>
+</body>
+</html>
